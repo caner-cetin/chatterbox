@@ -47,14 +47,6 @@ def initialize_model():
     logger.success(f"Model loaded in {time.perf_counter() - t0:.2f}s")
     
     t0 = time.perf_counter()
-    logger.info("Converting t3 model to bfloat16...")
-    try:
-        model.t3 = model.t3.to(torch.bfloat16)
-        logger.success(f"bfloat16 conversion done in {time.perf_counter() - t0:.2f}s")
-    except Exception as e:
-        logger.warning(f"bfloat16 conversion failed, using float32: {e}")
-    
-    t0 = time.perf_counter()
     logger.info(f"Pre-computing conditionals from: {REFERENCE_AUDIO_PATH}")
     if not os.path.exists(REFERENCE_AUDIO_PATH):
         raise FileNotFoundError(
