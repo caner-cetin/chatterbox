@@ -25,6 +25,9 @@ dependencies = [
     "pyloudnorm",
     "omegaconf",
     "onnx<1.19",
+    "flask>=3.1.2",
+    "rich>=14.2.0",
+    "loguru>=0.7.3",
 ]
 
 [project.urls]
