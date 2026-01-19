@@ -1,6 +1,8 @@
 import os
 import io
 import time
+import sys
+import argparse
 
 cpu_count = os.cpu_count() or 4
 threads_for_tts = max(1, cpu_count - 2)
@@ -14,6 +16,7 @@ from loguru import logger
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
+from gunicorn.app.wsgiapp import WSGIApplication
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
 console = Console()
@@ -35,11 +38,20 @@ REFERENCE_AUDIO_PATH = os.getenv(
 )
 
 app = Flask(__name__)
-model = None
+app.config['model'] = None
+app.config['model_initialized'] = False
+app.config['device'] = device
 
 
 def initialize_model():
-    global model
+    if app.config['model_initialized']:
+        return
+    
+    console.print(Panel(
+        Text("Initializing model...", style="bold yellow"),
+        title="Model Initialization",
+        border_style="yellow"
+    ))
     
     t0 = time.perf_counter()
     logger.info("Loading ChatterboxTurboTTS model...")
@@ -73,19 +85,30 @@ def initialize_model():
         logger.success(f"Warmup completed in {time.perf_counter() - t0:.2f}s")
     except Exception as e:
         logger.warning(f"Warmup failed: {e}")
+    
+    app.config['model'] = model
+    app.config['model_initialized'] = True
+    logger.success("Model initialization complete")
 
 
-console.print(Panel(
-    Text("Initializing model at startup...", style="bold yellow"),
-    title="Model Initialization",
-    border_style="yellow"
-))
+def cleanup_model():
+    if app.config['model'] is not None:
+        logger.info("Cleaning up model...")
+        del app.config['model']
+        app.config['model'] = None
+        app.config['model_initialized'] = False
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        logger.info("Model cleanup complete")
 
-try:
-    initialize_model()
-except Exception as e:
-    logger.critical(f"Failed to initialize model: {e}")
-    raise
+
+@app.before_request
+def ensure_model_initialized():
+    if not app.config['model_initialized']:
+        try:
+            initialize_model()
+        except Exception as e:
+            logger.critical(f"Failed to initialize model: {e}")
+            raise
 
 ALLOWED_ORIGIN = "https://jukebox.cansu.dev"
 
@@ -119,9 +142,14 @@ def add_cors_headers(response):
     return response
 
 
+@app.teardown_appcontext
+def teardown_model(error):
+    pass
+
+
 @app.route('/generate', methods=['POST', 'OPTIONS'])
 def generate():
-    global model
+    model = app.config.get('model')
     
     if model is None:
         return jsonify({"error": "Model not initialized"}), 500
@@ -179,16 +207,102 @@ def generate():
 
 @app.route('/health', methods=['GET', 'OPTIONS'])
 def health():
+    model = app.config.get('model')
     if model is None:
         return jsonify({"status": "not_ready", "message": "Model not initialized"}), 503
-    return jsonify({"status": "ready", "device": device, "threads": threads_for_tts})
+    return jsonify({"status": "ready", "device": app.config['device'], "threads": threads_for_tts})
+
+
+def daemonize():
+    try:
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)
+    except OSError as e:
+        logger.error(f"Fork failed: {e}")
+        sys.exit(1)
+    
+    os.chdir("/")
+    os.setsid()
+    os.umask(0)
+    
+    try:
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)
+    except OSError as e:
+        logger.error(f"Second fork failed: {e}")
+        sys.exit(1)
+    
+    sys.stdout.flush()
+    sys.stderr.flush()
+    
+    si = open(os.devnull, 'r')
+    so = open(os.devnull, 'a+')
+    se = open(os.devnull, 'a+')
+    
+    os.dup2(si.fileno(), sys.stdin.fileno())
+    os.dup2(so.fileno(), sys.stdout.fileno())
+    os.dup2(se.fileno(), sys.stderr.fileno())
+
+
+class StandaloneApplication(WSGIApplication):
+    def __init__(self, app, options=None):
+        self.options = options or {}
+        self.application = app
+        super().__init__()
+    
+    def load_config(self):
+        for key, value in self.options.items():
+            if key in self.cfg.settings and value is not None:
+                self.cfg.set(key.lower(), value)
+    
+    def on_starting(self, server):
+        logger.info("Gunicorn worker starting...")
+        with app.app_context():
+            try:
+                initialize_model()
+            except Exception as e:
+                logger.critical(f"Failed to initialize model on worker start: {e}")
+                raise
+    
+    def on_exit(self, server):
+        logger.info("Gunicorn worker shutting down...")
+        with app.app_context():
+            cleanup_model()
 
 
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5000))
+    parser = argparse.ArgumentParser(description='ChatterboxTTS CPU Server')
+    parser.add_argument('--port', type=int, default=int(os.getenv("PORT", 5000)),
+                        help='Port to run server on (default: 5000)')
+    parser.add_argument('--daemon', action='store_true',
+                        help='Run server in background (detached from stdin)')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Number of worker processes (default: 1)')
+    parser.add_argument('--timeout', type=int, default=120,
+                        help='Worker timeout in seconds (default: 120)')
+    args = parser.parse_args()
+    
+    if args.daemon:
+        logger.info("Daemonizing server...")
+        daemonize()
+        logger.info("Server running in background")
+    
     console.print(Panel(
-        Text(f"Starting Flask server on port {port}...", style="bold blue"),
+        Text(f"Starting Gunicorn server on port {args.port} with {args.workers} worker(s)...", style="bold blue"),
         title="Server Startup",
         border_style="blue"
     ))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    
+    options = {
+        'bind': f'0.0.0.0:{args.port}',
+        'workers': args.workers,
+        'timeout': args.timeout,
+        'worker_class': 'sync',
+        'accesslog': '-',
+        'errorlog': '-',
+        'loglevel': 'info',
+    }
+    
+    StandaloneApplication(app, options).run()
