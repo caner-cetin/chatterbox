@@ -25,6 +25,7 @@ distlib==0.4.0
 einops==0.8.1
 fastapi==0.128.0
 ffmpy==1.0.0
+flask==3.0.0
 filelock==3.20.3
 fonttools==4.61.1
 fsspec==2026.1.0
@@ -47,6 +48,7 @@ kiwisolver==1.4.9
 lazy-loader==0.4
 librosa==0.11.0
 llvmlite==0.46.0
+loguru==0.7.2
 markdown==3.10
 markdown-it-py==4.0.0
 markupsafe==3.0.3
