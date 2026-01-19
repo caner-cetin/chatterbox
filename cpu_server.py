@@ -1,5 +1,12 @@
 import os
 import io
+import time
+
+cpu_count = os.cpu_count() or 4
+threads_for_tts = max(1, cpu_count - 2)
+os.environ["OMP_NUM_THREADS"] = str(threads_for_tts)
+os.environ["MKL_NUM_THREADS"] = str(threads_for_tts)
+
 import torch
 import torchaudio as ta
 from flask import Flask, request, jsonify, Response
@@ -12,13 +19,12 @@ from chatterbox.tts_turbo import ChatterboxTurboTTS
 console = Console()
 device = "cpu"
 
-cpu_count = os.cpu_count() or 4
-threads_for_tts = max(1, cpu_count - 2)
 torch.set_num_threads(threads_for_tts)
+torch.set_num_interop_threads(1)
 torch.set_flush_denormal(True)
 
 console.print(Panel(
-    Text(f"Using {threads_for_tts} CPU threads for TTS (reserved 2 cores for AzuraCast)", style="bold green"),
+    Text(f"CPU threads: {threads_for_tts} | Interop: 1 | OMP/MKL: {threads_for_tts}", style="bold green"),
     title="CPU Configuration",
     border_style="green"
 ))
@@ -35,11 +41,21 @@ model = None
 def initialize_model():
     global model
     
+    t0 = time.perf_counter()
     logger.info("Loading ChatterboxTurboTTS model...")
     model = ChatterboxTurboTTS.from_pretrained(device)
-    logger.success(f"Model loaded on device: {device}")
+    logger.success(f"Model loaded in {time.perf_counter() - t0:.2f}s")
     
-    logger.info(f"Pre-computing conditionals from reference audio: {REFERENCE_AUDIO_PATH}")
+    t0 = time.perf_counter()
+    logger.info("Converting t3 model to bfloat16...")
+    try:
+        model.t3 = model.t3.to(torch.bfloat16)
+        logger.success(f"bfloat16 conversion done in {time.perf_counter() - t0:.2f}s")
+    except Exception as e:
+        logger.warning(f"bfloat16 conversion failed, using float32: {e}")
+    
+    t0 = time.perf_counter()
+    logger.info(f"Pre-computing conditionals from: {REFERENCE_AUDIO_PATH}")
     if not os.path.exists(REFERENCE_AUDIO_PATH):
         raise FileNotFoundError(
             f"Reference audio file not found: {REFERENCE_AUDIO_PATH}. "
@@ -47,22 +63,16 @@ def initialize_model():
         )
     
     model.prepare_conditionals(REFERENCE_AUDIO_PATH)
-    logger.success("Conditionals pre-computed successfully")
+    logger.success(f"Conditionals computed in {time.perf_counter() - t0:.2f}s")
     
-    logger.info("Compiling model with torch.compile for...")
-    try:
-        model.t3.tfmr = torch.compile(model.t3.tfmr, mode="reduce-overhead")
-        logger.success("Model compiled successfully")
-    except Exception as e:
-        logger.warning(f"torch.compile failed (will use eager mode): {e}")
-    
-    logger.info("Warming up model with dummy inference...")
+    t0 = time.perf_counter()
+    logger.info("Warming up model...")
     try:
         with torch.inference_mode():
             dummy_wav = model.generate("Hello, this is a warmup.")
-        logger.success("Model warmup completed")
+        logger.success(f"Warmup completed in {time.perf_counter() - t0:.2f}s")
     except Exception as e:
-        logger.warning(f"Model warmup failed: {e}")
+        logger.warning(f"Warmup failed: {e}")
 
 
 console.print(Panel(
@@ -136,9 +146,12 @@ def generate():
         return jsonify({"error": f"Invalid request: {str(e)}"}), 400
     
     try:
+        t0 = time.perf_counter()
         with torch.inference_mode():
             wav_tensor = model.generate(text)
+        t_inference = time.perf_counter() - t0
         
+        t0 = time.perf_counter()
         if wav_tensor.dim() == 1:
             wav_tensor = wav_tensor.unsqueeze(0)
         
@@ -146,6 +159,9 @@ def generate():
         ta.save(buffer, wav_tensor, model.sr, format="wav")
         buffer.seek(0)
         wav_bytes = buffer.read()
+        t_encode = time.perf_counter() - t0
+        
+        logger.info(f"Generated {len(text)} chars | inference: {t_inference:.2f}s | encode: {t_encode:.2f}s")
         
         return Response(
             wav_bytes,
@@ -165,7 +181,7 @@ def generate():
 def health():
     if model is None:
         return jsonify({"status": "not_ready", "message": "Model not initialized"}), 503
-    return jsonify({"status": "ready", "device": device})
+    return jsonify({"status": "ready", "device": device, "threads": threads_for_tts})
 
 
 if __name__ == '__main__':
