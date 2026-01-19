@@ -7,7 +7,7 @@ from loguru import logger
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from chatterbox.tts import ChatterboxTTS
+from chatterbox.tts_turbo import ChatterboxTurboTTS
 
 console = Console()
 device = "cpu"
@@ -35,8 +35,8 @@ model = None
 def initialize_model():
     global model
     
-    logger.info("Loading ChatterboxTTS model...")
-    model = ChatterboxTTS.from_pretrained(device)
+    logger.info("Loading ChatterboxTurboTTS model...")
+    model = ChatterboxTurboTTS.from_pretrained(device)
     logger.success(f"Model loaded on device: {device}")
     
     logger.info(f"Pre-computing conditionals from reference audio: {REFERENCE_AUDIO_PATH}")
@@ -46,8 +46,15 @@ def initialize_model():
             f"Please set REFERENCE_AUDIO_PATH environment variable."
         )
     
-    model.prepare_conditionals(REFERENCE_AUDIO_PATH, exaggeration=0.5)
+    model.prepare_conditionals(REFERENCE_AUDIO_PATH)
     logger.success("Conditionals pre-computed successfully")
+    
+    logger.info("Compiling model with torch.compile for...")
+    try:
+        model.t3.tfmr = torch.compile(model.t3.tfmr, mode="reduce-overhead")
+        logger.success("Model compiled successfully")
+    except Exception as e:
+        logger.warning(f"torch.compile failed (will use eager mode): {e}")
     
     logger.info("Warming up model with dummy inference...")
     try:
