@@ -1,7 +1,7 @@
 import torch
 import torchaudio as ta
 
-from chatterbox.vc import ChatterboxVC
+from chatterbox.tts import ChatterboxTTS
 
 # Automatically detect the best available device
 if torch.cuda.is_available():
@@ -13,12 +13,11 @@ else:
 
 print(f"Using device: {device}")
 
-AUDIO_PATH = "YOUR_FILE.wav"
-TARGET_VOICE_PATH = "YOUR_FILE.wav"
+AUDIO_PATH = "/home/cansu/Downloads/Voices/GLaDOS/00_part1_entry-2.wav"
 
-model = ChatterboxVC.from_pretrained(device)
+model = ChatterboxTTS.from_pretrained(device)
 wav = model.generate(
-    audio=AUDIO_PATH,
-    target_voice_path=TARGET_VOICE_PATH,
+    "Thank you for tuning to the yuri jukebox. Our next song is fourty thousand yyears by DHigh On Fire. We hope you enjoy.",
+    audio_prompt_path=AUDIO_PATH,
 )
 ta.save("testvc.wav", wav, model.sr)
