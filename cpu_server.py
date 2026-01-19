@@ -58,7 +58,15 @@ def initialize_model():
     logger.success(f"Conditionals computed in {time.perf_counter() - t0:.2f}s")
     
     t0 = time.perf_counter()
-    logger.info("Warming up model...")
+    logger.info("Compiling model with torch.compile...")
+    try:
+        model.t3.tfmr = torch.compile(model.t3.tfmr, mode="reduce-overhead")
+        logger.success(f"Model compiled in {time.perf_counter() - t0:.2f}s")
+    except Exception as e:
+        logger.warning(f"torch.compile failed (requires g++): {e}")
+    
+    t0 = time.perf_counter()
+    logger.info("Warming up model (first run triggers JIT compilation)...")
     try:
         with torch.inference_mode():
             dummy_wav = model.generate("Hello, this is a warmup.")
